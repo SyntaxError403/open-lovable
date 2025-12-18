@@ -1,5 +1,6 @@
 import { Sandbox } from '@vercel/sandbox';
 import { SandboxProvider, SandboxInfo, CommandResult } from '../types';
+import { appConfig } from '../../../config/app.config';
 // SandboxProviderConfig available through parent class
 
 export class VercelProvider extends SandboxProvider {
@@ -24,9 +25,9 @@ export class VercelProvider extends SandboxProvider {
       // Create Vercel sandbox
       
       const sandboxConfig: any = {
-        timeout: 300000, // 5 minutes in ms
-        runtime: 'node22', // Use node22 runtime for Vercel sandboxes
-        ports: [5173] // Vite port
+        timeout: appConfig.vercelSandbox.timeoutMs, // Use configurable timeout
+        runtime: appConfig.vercelSandbox.runtime, // Use runtime from config
+        ports: [appConfig.vercelSandbox.devPort] // Dev server port from config
       };
 
       // Add authentication based on environment variables
@@ -44,7 +45,7 @@ export class VercelProvider extends SandboxProvider {
       // Sandbox created successfully
       
       // Get the sandbox URL using the correct Vercel Sandbox API
-      const sandboxUrl = this.sandbox.domain(5173);
+      const sandboxUrl = this.sandbox.domain(appConfig.vercelSandbox.devPort);
 
       this.sandboxInfo = {
         sandboxId,
@@ -369,7 +370,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     host: '0.0.0.0',
-    port: 5173,
+    port: ${appConfig.vercelSandbox.devPort},
     strictPort: true,
     allowedHosts: [
       '.vercel.run',  // Allow all Vercel sandbox domains
@@ -580,6 +581,26 @@ body {
 
   getSandboxInfo(): SandboxInfo | null {
     return this.sandboxInfo;
+  }
+
+  /**
+   * Extend the sandbox timeout to prevent disconnection
+   * @param additionalMs Additional time in milliseconds to extend the sandbox
+   */
+  async extendTimeout(additionalMs: number = appConfig.vercelSandbox.timeoutMs): Promise<boolean> {
+    if (!this.sandbox) {
+      console.warn('[VercelProvider] No active sandbox to extend timeout');
+      return false;
+    }
+    
+    try {
+      await this.sandbox.extendTimeout(additionalMs);
+      console.log(`[VercelProvider] Extended sandbox timeout by ${additionalMs / 1000 / 60} minutes`);
+      return true;
+    } catch (error) {
+      console.error('[VercelProvider] Failed to extend sandbox timeout:', error);
+      return false;
+    }
   }
 
   async terminate(): Promise<void> {

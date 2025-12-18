@@ -4,8 +4,8 @@
 export const appConfig = {
   // Vercel Sandbox Configuration
   vercelSandbox: {
-    // Sandbox timeout in minutes
-    timeoutMinutes: 15,
+    // Sandbox timeout in minutes (max supported by Vercel is 60 minutes)
+    timeoutMinutes: 60,
 
     // Convert to milliseconds for Vercel Sandbox API
     get timeoutMs() {

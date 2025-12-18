@@ -106,6 +106,7 @@ function AISandboxPage() {
   const [loadingStage, setLoadingStage] = useState<'gathering' | 'planning' | 'generating' | null>(null);
   const [isStartingNewGeneration, setIsStartingNewGeneration] = useState(false);
   const [sandboxFiles, setSandboxFiles] = useState<Record<string, string>>({});
+  const [hasSavedFiles, setHasSavedFiles] = useState<boolean>(false);
   const [hasInitialSubmission, setHasInitialSubmission] = useState<boolean>(false);
   const [fileStructure, setFileStructure] = useState<string>('');
   
@@ -159,6 +160,265 @@ function AISandboxPage() {
 
   // Store flag to trigger generation after component mounts
   const [shouldAutoGenerate, setShouldAutoGenerate] = useState(false);
+
+  // LocalStorage persistence keys
+  const STORAGE_KEYS = {
+    chatMessages: 'openlovable_chat_messages',
+    sandboxData: 'openlovable_sandbox_data',
+    sandboxFiles: 'openlovable_sandbox_files',
+    conversationContext: 'openlovable_conversation_context',
+  };
+
+  // Restore state from localStorage on mount
+  useEffect(() => {
+    try {
+      // Restore chat messages
+      const savedMessages = localStorage.getItem(STORAGE_KEYS.chatMessages);
+      if (savedMessages) {
+        const parsed = JSON.parse(savedMessages);
+        // Convert timestamp strings back to Date objects
+        const restored = parsed.map((msg: any) => ({
+          ...msg,
+          timestamp: new Date(msg.timestamp)
+        }));
+        setChatMessages(restored);
+        console.log('[persistence] Restored', restored.length, 'chat messages from localStorage');
+      }
+
+      // Restore sandbox data
+      const savedSandbox = localStorage.getItem(STORAGE_KEYS.sandboxData);
+      if (savedSandbox) {
+        const parsed = JSON.parse(savedSandbox);
+        // Check if sandbox is still valid (created less than 55 mins ago to be safe)
+        const createdAt = new Date(parsed.createdAt || 0);
+        const ageMinutes = (Date.now() - createdAt.getTime()) / (1000 * 60);
+        if (ageMinutes < 55) {
+          setSandboxData(parsed);
+          console.log('[persistence] Restored sandbox data from localStorage:', parsed.sandboxId);
+        } else {
+          console.log('[persistence] Saved sandbox expired, will create new one');
+          localStorage.removeItem(STORAGE_KEYS.sandboxData);
+        }
+      }
+
+      // Restore sandbox files
+      const savedFiles = localStorage.getItem(STORAGE_KEYS.sandboxFiles);
+      if (savedFiles) {
+        const parsedFiles = JSON.parse(savedFiles);
+        setSandboxFiles(parsedFiles);
+        setHasSavedFiles(Object.keys(parsedFiles).length > 0);
+        console.log('[persistence] Restored sandbox files from localStorage');
+      }
+
+      // Restore conversation context
+      const savedContext = localStorage.getItem(STORAGE_KEYS.conversationContext);
+      if (savedContext) {
+        const parsed = JSON.parse(savedContext);
+        // Convert timestamp strings back to Date objects
+        if (parsed.scrapedWebsites) {
+          parsed.scrapedWebsites = parsed.scrapedWebsites.map((w: any) => ({
+            ...w,
+            timestamp: new Date(w.timestamp)
+          }));
+        }
+        if (parsed.appliedCode) {
+          parsed.appliedCode = parsed.appliedCode.map((c: any) => ({
+            ...c,
+            timestamp: new Date(c.timestamp)
+          }));
+        }
+        setConversationContext(parsed);
+        console.log('[persistence] Restored conversation context from localStorage');
+      }
+    } catch (error) {
+      console.error('[persistence] Failed to restore from localStorage:', error);
+    }
+  }, []);
+
+  // Persist chat messages to localStorage
+  useEffect(() => {
+    // Don't save the initial welcome message alone
+    if (chatMessages.length <= 1) return;
+    try {
+      localStorage.setItem(STORAGE_KEYS.chatMessages, JSON.stringify(chatMessages));
+    } catch (error) {
+      console.error('[persistence] Failed to save chat messages:', error);
+    }
+  }, [chatMessages]);
+
+  // Persist sandbox data to localStorage
+  useEffect(() => {
+    if (!sandboxData) return;
+    try {
+      // Add timestamp if not present
+      const dataToSave = {
+        ...sandboxData,
+        createdAt: sandboxData.createdAt || new Date().toISOString()
+      };
+      localStorage.setItem(STORAGE_KEYS.sandboxData, JSON.stringify(dataToSave));
+    } catch (error) {
+      console.error('[persistence] Failed to save sandbox data:', error);
+    }
+  }, [sandboxData]);
+
+  // Persist sandbox files to localStorage
+  useEffect(() => {
+    const fileCount = Object.keys(sandboxFiles).length;
+    setHasSavedFiles(fileCount > 0);
+    if (fileCount === 0) return;
+    try {
+      localStorage.setItem(STORAGE_KEYS.sandboxFiles, JSON.stringify(sandboxFiles));
+    } catch (error) {
+      console.error('[persistence] Failed to save sandbox files:', error);
+    }
+  }, [sandboxFiles]);
+
+  // Persist conversation context to localStorage
+  useEffect(() => {
+    if (conversationContext.scrapedWebsites.length === 0 && 
+        conversationContext.generatedComponents.length === 0 &&
+        conversationContext.appliedCode.length === 0) return;
+    try {
+      localStorage.setItem(STORAGE_KEYS.conversationContext, JSON.stringify(conversationContext));
+    } catch (error) {
+      console.error('[persistence] Failed to save conversation context:', error);
+    }
+  }, [conversationContext]);
+
+  // Keep-alive mechanism: extend sandbox timeout every 10 minutes
+  useEffect(() => {
+    if (!sandboxData?.sandboxId) return;
+
+    const extendSandboxTimeout = async () => {
+      try {
+        const response = await fetch('/api/extend-sandbox-timeout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            sandboxId: sandboxData.sandboxId,
+            additionalMinutes: 30 // Extend by 30 minutes each time
+          })
+        });
+        
+        if (response.ok) {
+          console.log('[keep-alive] Extended sandbox timeout successfully');
+        } else {
+          console.warn('[keep-alive] Failed to extend sandbox timeout');
+        }
+      } catch (error) {
+        console.error('[keep-alive] Error extending sandbox timeout:', error);
+      }
+    };
+
+    // Extend timeout every 10 minutes (600000ms)
+    const intervalId = setInterval(extendSandboxTimeout, 10 * 60 * 1000);
+    
+    // Also extend immediately on mount to ensure we have time
+    extendSandboxTimeout();
+
+    return () => clearInterval(intervalId);
+  }, [sandboxData?.sandboxId]);
+
+  // Function to restore project to a new sandbox from saved files
+  const restoreProject = async () => {
+    const savedFiles = localStorage.getItem(STORAGE_KEYS.sandboxFiles);
+    if (!savedFiles) {
+      addChatMessage('No saved project files to restore.', 'error');
+      return;
+    }
+
+    const files = JSON.parse(savedFiles);
+    const fileCount = Object.keys(files).length;
+    
+    addChatMessage(`Restoring project with ${fileCount} files...`, 'system');
+    setLoading(true);
+
+    try {
+      // Create a new sandbox
+      const response = await fetch('/api/create-ai-sandbox-v2', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+
+      const data = await response.json();
+      if (!data.success) {
+        throw new Error(data.error || 'Failed to create sandbox');
+      }
+
+      setSandboxData(data);
+
+      // Restore all files to the new sandbox
+      for (const [filePath, content] of Object.entries(files)) {
+        try {
+          await fetch('/api/apply-ai-code', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sandboxId: data.sandboxId,
+              files: [{ path: filePath, content }],
+              skipPackageInstall: true
+            })
+          });
+        } catch (error) {
+          console.error(`[restore] Failed to restore file ${filePath}:`, error);
+        }
+      }
+
+      // Install packages after restoring all files
+      await fetch('/api/detect-and-install-packages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sandboxId: data.sandboxId })
+      });
+
+      // Restart Vite to pick up changes
+      await fetch('/api/restart-vite', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sandboxId: data.sandboxId })
+      });
+
+      addChatMessage(`Project restored successfully! ${fileCount} files recovered.`, 'system');
+      updateStatus('Sandbox active', true);
+      
+      // Refresh file list
+      setTimeout(fetchSandboxFiles, 2000);
+    } catch (error) {
+      console.error('[restore] Failed to restore project:', error);
+      addChatMessage(`Failed to restore project: ${(error as Error).message}`, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Function to clear saved session and start fresh
+  const clearSession = () => {
+    localStorage.removeItem(STORAGE_KEYS.chatMessages);
+    localStorage.removeItem(STORAGE_KEYS.sandboxData);
+    localStorage.removeItem(STORAGE_KEYS.sandboxFiles);
+    localStorage.removeItem(STORAGE_KEYS.conversationContext);
+    
+    // Reset state
+    setChatMessages([{
+      content: 'Session cleared. Starting fresh!',
+      type: 'system',
+      timestamp: new Date()
+    }]);
+    setSandboxData(null);
+    setSandboxFiles({});
+    setHasSavedFiles(false);
+    setConversationContext({
+      scrapedWebsites: [],
+      generatedComponents: [],
+      appliedCode: [],
+      currentProject: '',
+      lastGeneratedCode: undefined
+    });
+    
+    // Create a new sandbox
+    createSandbox(false);
+  };
 
   // Clear old conversation data on component mount and create/restore sandbox
   useEffect(() => {
@@ -3933,6 +4193,36 @@ Focus on the key sections and content, making it clean and modern.`;
                   </svg>
                 </a>
               )}
+              
+              {/* Session Management Buttons */}
+              <div className="flex items-center gap-1 border-l border-gray-200 pl-2 ml-1">
+                {/* Restore Project Button - only show if we have saved files but no active sandbox */}
+                {!sandboxData && hasSavedFiles && (
+                  <button
+                    onClick={restoreProject}
+                    disabled={loading}
+                    title="Restore saved project"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-blue-50 border border-blue-200 rounded-md text-xs font-medium text-blue-700 hover:bg-blue-100 transition-all disabled:opacity-50"
+                  >
+                    <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                    Restore
+                  </button>
+                )}
+                
+                {/* Clear Session Button */}
+                <button
+                  onClick={clearSession}
+                  disabled={loading}
+                  title="Clear session and start fresh"
+                  className="p-1.5 rounded-md transition-all text-gray-500 hover:text-red-600 hover:bg-red-50 disabled:opacity-50"
+                >
+                  <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                </button>
+              </div>
             </div>
           </div>
           <div className="flex-1 relative overflow-hidden">
